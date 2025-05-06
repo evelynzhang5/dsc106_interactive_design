@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Interactive Carbs vs. Glucose Spike Scatter</title>
+  <title>Interactive Nutrient vs. Glucose Spike Scatter</title>
   <script src="https://d3js.org/d3.v6.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/d3-lasso@1"></script>
   <style>
@@ -17,13 +17,13 @@
 </head>
 <body>
   <div id="controls">
-    <label>Max Carbs: <span id="sliderValue">100</span>g</label>
-    <input id="carbSlider" type="range" min="0" max="120" value="100">
-    <label>Color by: </label>
+    <label id="sliderLabel">Filter Carbs ≤ <span id="sliderValue">100</span></label>
+    <input id="valueSlider" type="range" min="0" max="120" value="100">
+    <label>Y-axis / Color by: </label>
     <select id="nutrientSelect">
-      <option value="protein">Protein</option>
-      <option value="total_fat">Fat</option>
-      <option value="total_carb">Fiber</option>
+      <option value="carbs">Carbs (g)</option>
+      <option value="protein">Protein (g)</option>
+      <option value="total_fat">Fat (g)</option>
     </select>
   </div>
   <svg id="scatter" width="600" height="400"></svg>
@@ -31,7 +31,7 @@
   <svg id="averageCurve" width="600" height="200"></svg>
 
   <script>
-    const margin = {top: 20, right: 20, bottom: 40, left: 50};
+    const margin = {top: 20, right: 20, bottom: 50, left: 60};
     const width = 600 - margin.left - margin.right;
     const height = 400 - margin.top - margin.bottom;
     const svg = d3.select('#scatter')
@@ -40,106 +40,144 @@
 
     const tooltip = d3.select('#tooltip');
 
+    function capitalize(str) {
+      return str.charAt(0).toUpperCase() + str.slice(1).replace('_', ' ');
+    }
+
     Promise.all([
-      d3.csv('Food_log_001.csv', d => ({
-        id: d.date + ' ' + d.time,
+      d3.csv('foodlog_clean.csv', d => ({
         carbs: +d.total_carb,
         protein: +d.protein,
         total_fat: +d.total_fat,
         time_begin: new Date(d.time_begin)
       })),
-      d3.csv('Dexcom_001.csv', d => ({
-        timestamp: new Date(d['Timestamp']),
-        glucose: +d['Glucose Value (mg/dL)']
+      d3.csv('dexcom_clean.csv', d => ({
+        timestamp: new Date(d.timestamp),
+        glucose: +d.glucose
       }))
     ]).then(([meals, dexcom]) => {
-      // Precompute spike and curve for each meal
+      // compute spike
       meals.forEach(m => {
         const window = dexcom.filter(pt => pt.timestamp >= m.time_begin && pt.timestamp <= new Date(m.time_begin.getTime() + 2*3600*1000));
         m.curve = window;
-        if (window.length) m.spike = d3.max(window, d => d.glucose) - window[0].glucose;
-        else m.spike = 0;
+        m.spike = window.length ? d3.max(window, d=>d.glucose) - window[0].glucose : 0;
       });
+      meals = meals.filter(d=>d.spike>0);
 
-      // filter out meals without spike
-      meals = meals.filter(d => !isNaN(d.spike));
+      // initial state
+      let currentKey = 'carbs';
 
-      const x = d3.scaleLinear().domain([0, d3.max(meals, d=>d.carbs)]).range([0, width]);
-      const y = d3.scaleLinear().domain([0, d3.max(meals, d=>d.spike)]).range([height,0]);
-      const color = d3.scaleSequential(d3.interpolateViridis).domain(d3.extent(meals, d=>d.protein));
+      // create scales
+      const x = d3.scaleLinear().domain(d3.extent(meals, d=>d.spike)).nice().range([0, width]);
+      let y = d3.scaleLinear().domain(d3.extent(meals, d=>d[currentKey])).nice().range([height, 0]);
+      let colorScale = d3.scaleSequential(d3.interpolateViridis).domain(d3.extent(meals, d=>d[currentKey]));
 
-      svg.append('g').attr('transform', `translate(0,${height})`).call(d3.axisBottom(x));
-      svg.append('g').call(d3.axisLeft(y));
-      svg.append('text').attr('x', width/2).attr('y', height+35).attr('text-anchor','middle').text('Carbs (g)');
-      svg.append('text').attr('transform','rotate(-90)').attr('x', -height/2).attr('y', -35).attr('text-anchor','middle').text('2-hr Spike (mg/dL)');
+      // axes
+      const xAxis = svg.append('g').attr('transform', `translate(0,${height})`).call(d3.axisBottom(x));
+      const yAxis = svg.append('g').call(d3.axisLeft(y));
 
+      // axis labels
+      svg.append('text')
+        .attr('class','xlabel')
+        .attr('x', width/2)
+        .attr('y', height + margin.bottom - 5)
+        .attr('text-anchor','middle')
+        .text('2-hr Glucose Spike (mg/dL)');
+      const yLabel = svg.append('text')
+        .attr('class','ylabel')
+        .attr('transform','rotate(-90)')
+        .attr('x', -height/2)
+        .attr('y', -margin.left + 15)
+        .attr('text-anchor','middle')
+        .text(capitalize(currentKey));
+
+      // draw dots
       const dots = svg.append('g').selectAll('.dot')
         .data(meals)
         .enter().append('circle')
         .attr('class','dot')
-        .attr('cx', d=>x(d.carbs))
-        .attr('cy', d=>y(d.spike))
-        .attr('r',5)
-        .attr('fill', d=>color(d.protein))
-        .on('mouseover', (event,d)=>{
-          tooltip.transition().duration(200).style('opacity',.9);
-          tooltip.html(`<strong>Carbs:</strong> ${d.carbs}g<br><strong>Spike:</strong> ${d.spike.toFixed(1)}<br>`)
-            .style('left', (event.pageX+10)+'px').style('top', (event.pageY-28)+'px');
-          // draw mini-curve
-          const mini = tooltip.append('svg').attr('width',180).attr('height',80);
-          const mx = d3.scaleTime().domain(d3.extent(d.curve, c=>c.timestamp)).range([0,160]);
-          const my = d3.scaleLinear().domain(d3.extent(d.curve, c=>c.glucose)).range([60,0]);
-          const miniLine = d3.line()
-            .x(c=>mx(c.timestamp))
-            .y(c=>my(c.glucose));
-          mini.append('path').datum(d.curve)
-            .attr('d',miniLine).attr('stroke','steelblue').attr('fill','none');
-        })
-        .on('mouseout', ()=> tooltip.transition().duration(200).style('opacity',0));
+        .attr('cx', d=>x(d.spike))
+        .attr('cy', d=>y(d[currentKey]))
+        .attr('r', 5)
+        .attr('fill', d=>colorScale(d[currentKey]));
 
-      // Slider filter
-      d3.select('#carbSlider').on('input', function() {
-        const maxC = +this.value;
-        d3.select('#sliderValue').text(maxC);
-        dots.attr('display', d=> d.carbs <= maxC ? null : 'none');
+      // update slider function
+      const slider = d3.select('#valueSlider');
+      const sliderLabel = d3.select('#sliderLabel');
+      function updateSlider() {
+        const maxVal = d3.max(meals, d=>d[currentKey]);
+        slider.attr('max', maxVal).property('value', maxVal);
+        sliderLabel.html(`Filter ${capitalize(currentKey)} ≤ <span id="sliderValue">${maxVal}</span>`);
+      }
+      updateSlider();
+
+      // slider filter
+      slider.on('input', function() {
+        const v = +this.value;
+        d3.select('#sliderValue').text(v);
+        dots.attr('display', d=> d[currentKey] <= v ? null : 'none');
       });
 
-      // Dropdown recolor
+      // tooltip
+      dots.on('mouseover', (event, d) => {
+        tooltip.transition().duration(200).style('opacity', .9);
+        tooltip.html(
+          `<strong>${capitalize(currentKey)}:</strong> ${d[currentKey]}<br>` +
+          `<strong>Spike:</strong> ${d.spike.toFixed(1)} mg/dL` +
+          `<svg width="180" height="80"></svg>`
+        )
+        .style('left', (event.pageX + 10) + 'px')
+        .style('top', (event.pageY - 28) + 'px');
+        const mini = tooltip.select('svg');
+        const mx = d3.scaleTime().domain(d3.extent(d.curve, c=>c.timestamp)).range([0,160]);
+        const my = d3.scaleLinear().domain(d3.extent(d.curve, c=>c.glucose)).range([60,0]);
+        mini.append('path').datum(d.curve)
+          .attr('d', d3.line().x(c=>mx(c.timestamp)).y(c=>my(c.glucose)))
+          .attr('transform','translate(10,10)')
+          .attr('stroke','steelblue').attr('fill','none');
+      }).on('mouseout', () => tooltip.transition().duration(200).style('opacity', 0));
+
+      // dropdown change
       d3.select('#nutrientSelect').on('change', function() {
-        const key = this.value;
-        color.domain(d3.extent(meals, d=>d[key]));
-        dots.transition().attr('fill', d=>color(d[key]));
+        currentKey = this.value;
+        // update scales
+        y.domain(d3.extent(meals, d=>d[currentKey])).nice();
+        colorScale.domain(d3.extent(meals, d=>d[currentKey]));
+        // update axes and labels
+        yAxis.transition().duration(500).call(d3.axisLeft(y));
+        yLabel.text(capitalize(currentKey));
+        // update dots
+        dots.transition().duration(500)
+          .attr('cy', d=>y(d[currentKey]))
+          .attr('fill', d=>colorScale(d[currentKey]));
+        // update slider
+        updateSlider();
       });
 
-      // Lasso selection
+      // lasso selection
       const lasso = d3.lasso()
         .closePathSelect(true).closePathDistance(100)
         .items(dots)
         .targetArea(svg)
         .on('end', selection => {
           const selected = selection.selectedItems().data();
-          // highlight
           dots.classed('selected', d=>selected.includes(d));
-          // compute avg curve
           const allCurves = d3.merge(selected.map(d=>d.curve));
           if (allCurves.length) drawAvgCurve(allCurves);
         });
       svg.call(lasso);
 
       function drawAvgCurve(data) {
-        const ac = d3.select('#averageCurve').html('').append('g').attr('transform',`translate(${margin.left},10)`);
-        const x2 = d3.scaleTime().domain(d3.extent(data, d=>d.timestamp)).range([0,width]);
-        const y2 = d3.scaleLinear().domain(d3.extent(data, d=>d.glucose)).range([150,0]);
-        ac.append('g').attr('transform',`translate(0,150)`).call(d3.axisBottom(x2).ticks(4));
+        const ac = d3.select('#averageCurve').html('').append('g').attr('transform', `translate(${margin.left},10)`);
+        const x2 = d3.scaleTime().domain(d3.extent(data, d=>d.timestamp)).range([0, width]);
+        const y2 = d3.scaleLinear().domain(d3.extent(data, d=>d.glucose)).range([150, 0]);
+        ac.append('g').attr('transform', `translate(0,150)`).call(d3.axisBottom(x2).ticks(4));
         ac.append('g').call(d3.axisLeft(y2));
-        const avgLine = d3.line()
-          .x(d=>x2(d.timestamp))
-          .y(d=>y2(d3.mean(data.filter(e=>+e.timestamp===+d.timestamp), e=>e.glucose)));
-        // sample timestamps
         const times = [...new Set(data.map(d=>+d.timestamp))].map(t=>new Date(t)).sort((a,b)=>a-b);
-        const avgData = times.map(t=>({timestamp:t, glucose:d3.mean(data.filter(e=>+e.timestamp===+t), e=>e.glucose)}));
+        const avgData = times.map(t=>({ timestamp: t, glucose: d3.mean(data.filter(e=>+e.timestamp===+t), e=>e.glucose) }));
         ac.append('path').datum(avgData)
-          .attr('d',avgLine).attr('stroke','crimson').attr('fill','none').attr('stroke-width',2);
+          .attr('d', d3.line().x(d=>x2(d.timestamp)).y(d=>y2(d.glucose)))
+          .attr('stroke','crimson').attr('fill','none').attr('stroke-width',2);
       }
     });
   </script>
